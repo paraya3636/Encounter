@@ -24,12 +24,20 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Bundle
 import android.support.v4.app.NotificationCompat
 import android.text.TextUtils
-
+import android.util.Log
+import com.google.android.gms.common.api.GoogleApiClient
+import com.google.android.gms.common.api.ResultCallback
+import com.google.android.gms.common.api.Status
 import com.google.android.gms.nearby.Nearby
-import com.google.android.gms.nearby.messages.Message
-import com.google.android.gms.nearby.messages.MessageListener
+import com.google.android.gms.nearby.messages.*
+import org.greenrobot.eventbus.EventBus
+import org.paradrops.encounter.data.EncounterInfoDataStore
+import org.paradrops.encounter.eventbus.FoundEvent
+import org.paradrops.encounter.view.EncounterInfo
+import java.util.*
 
 
 /**
@@ -37,11 +45,38 @@ import com.google.android.gms.nearby.messages.MessageListener
  * current set of messages from nearby beacons. Nearby launches this service when a message is
  * found or lost, and this service updates the notification, then stops itself.
  */
-class BackgroundSubscribeIntentService : IntentService("BackgroundSubscribeIntentService") {
+class BackgroundSubscribeIntentService : IntentService("BackgroundSubscribeIntentService"), GoogleApiClient.ConnectionCallbacks {
+    private val TAG = BackgroundSubscribeIntentService::class.java.simpleName
+
+    private lateinit var mGoogleApiClient: GoogleApiClient
+
+    private val TTL_IN_SECONDS = 3 * 60 // Three minutes.
+    private val PUB_SUB_STRATEGY = Strategy.Builder()
+            .setTtlSeconds(TTL_IN_SECONDS).build()
+
+    private lateinit var mMessageListener: MessageListener
+
+    private var mPubMessage: Message? = null
 
     override fun onCreate() {
         super.onCreate()
+
+        mMessageListener = object : MessageListener() {
+            override fun onFound(message: Message?) {
+            }
+
+            override fun onLost(message: Message?) {
+            }
+        }
+
         updateNotification()
+        buildGoogleApiClient()
+        mGoogleApiClient.connect()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        mGoogleApiClient.disconnect()
     }
 
     override fun onHandleIntent(intent: Intent?) {
@@ -50,6 +85,14 @@ class BackgroundSubscribeIntentService : IntentService("BackgroundSubscribeInten
                 override fun onFound(message: Message) {
                     Utils.saveFoundMessage(applicationContext, message)
                     updateNotification()
+
+                    EncounterInfoDataStore().run {
+                        val deviceMessage = DeviceMessage.fromNearbyMessage(message)
+                        val info = EncounterInfo(deviceMessage.toString(), Date().toString())
+
+                        save(info)
+                        EventBus.getDefault().post(FoundEvent())
+                    }
                 }
 
                 override fun onLost(message: Message) {
@@ -58,6 +101,14 @@ class BackgroundSubscribeIntentService : IntentService("BackgroundSubscribeInten
                 }
             })
         }
+    }
+
+    override fun onConnected(p0: Bundle?) {
+        throw UnsupportedOperationException("not implemented") //To change body of created functions use File | Settings | File Templates.
+    }
+
+    override fun onConnectionSuspended(p0: Int) {
+        throw UnsupportedOperationException("not implemented") //To change body of created functions use File | Settings | File Templates.
     }
 
     private fun updateNotification() {
@@ -102,5 +153,93 @@ class BackgroundSubscribeIntentService : IntentService("BackgroundSubscribeInten
     companion object {
         private val MESSAGES_NOTIFICATION_ID = 1
         private val NUM_MESSAGES_IN_NOTIFICATION = 5
+    }
+
+    /**
+     * Subscribes to messages from nearby devices and updates the UI if the subscription either
+     * fails or TTLs.
+     */
+    private fun subscribe() {
+        Log.i(TAG, "Subscribing")
+        val options = SubscribeOptions.Builder()
+                .setStrategy(PUB_SUB_STRATEGY)
+                .setCallback(object : SubscribeCallback() {
+                    override fun onExpired() {
+                        super.onExpired()
+                        Log.i(TAG, "No longer subscribing")
+                    }
+                }).build()
+
+        Nearby.Messages.subscribe(mGoogleApiClient, mMessageListener, options)
+                .setResultCallback(ResultCallback<Status> { status ->
+                    if (status.isSuccess) {
+                        Log.i(TAG, "Subscribed successfully.")
+                    } else {
+                        logAndShowSnackbar("Could not subscribe, status = " + status)
+                    }
+                })
+    }
+
+    /**
+     * Publishes a message to nearby devices and updates the UI if the publication either fails or
+     * TTLs.
+     */
+    private fun publish() {
+        Log.i(TAG, "Publishing")
+        val options = PublishOptions.Builder()
+                .setStrategy(PUB_SUB_STRATEGY)
+                .setCallback(object : PublishCallback() {
+                    override fun onExpired() {
+                        super.onExpired()
+                        Log.i(TAG, "No longer publishing")
+                    }
+                }).build()
+
+        Nearby.Messages.publish(mGoogleApiClient, mPubMessage, options)
+                .setResultCallback { status ->
+                    if (status.isSuccess) {
+                        Log.i(TAG, "Published successfully.")
+                    } else {
+                        logAndShowSnackbar("Could not publish, status = " + status)
+                    }
+                }
+    }
+
+    /**
+     * Stops subscribing to messages from nearby devices.
+     */
+    private fun unsubscribe() {
+        Log.i(TAG, "Unsubscribing.")
+        Nearby.Messages.unsubscribe(mGoogleApiClient, mMessageListener)
+    }
+
+    /**
+     * Stops publishing message to nearby devices.
+     */
+    private fun unpublish() {
+        Log.i(TAG, "Unpublishing.")
+        Nearby.Messages.unpublish(mGoogleApiClient, mPubMessage)
+    }
+
+    /**
+     * Logs a message and shows a [Snackbar] using `text`;
+
+     * @param text The text used in the Log message and the SnackBar.
+     */
+    private fun logAndShowSnackbar(text: String) {
+        Log.w(TAG, text)
+    }
+
+    /**
+     * Builds [GoogleApiClient], enabling automatic lifecycle management using
+     * [GoogleApiClient.Builder.enableAutoManage]. I.e., GoogleApiClient connects in
+     * [AppCompatActivity.onStart], or if onStart() has already happened, it connects
+     * immediately, and disconnects automatically in [AppCompatActivity.onStop].
+     */
+    private fun buildGoogleApiClient() {
+        mGoogleApiClient = GoogleApiClient.Builder(this)
+                .addApi(Nearby.MESSAGES_API)
+                .addConnectionCallbacks(this)
+                .build()
     }
 }

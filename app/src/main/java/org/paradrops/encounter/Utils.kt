@@ -59,7 +59,7 @@ object Utils {
      */
     internal fun saveFoundMessage(context: Context, message: Message) {
         val cachedMessages = ArrayList(getCachedMessages(context))
-        val cachedMessagesSet = HashSet(cachedMessages)
+        val cachedMessagesSet = (cachedMessages)
         val messageString = String(message.content)
         if (!cachedMessagesSet.contains(messageString)) {
             cachedMessages.add(0, String(message.content))
